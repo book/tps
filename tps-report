@@ -1,0 +1,86 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use File::HomeDir;
+use File::Spec;
+use POSIX qw( strftime );
+use Getopt::Long;
+use List::MoreUtils 'uniq';
+
+# process the output of tps-track
+# using a list of regex per program / title to attach to projects
+GetOptions( \ my %option, 'split=i' ) or die "Bad options\n";
+
+# read config
+# format: project \t command \t title
+my $config = read_config(
+    File::Spec->catfile( File::HomeDir->my_data, '.tps', 'config' ) );
+
+my %chunks;
+my @chunks;
+while (<>) {
+    chomp;
+    my ( $time, $command, $title, $duration ) = split /\t/;
+
+    # check all command regexp
+    # fixme: default regexp for any command: easy: use //
+    my @command = grep { $command =~ /$_/ } @{$config->{_keys} };
+
+    # now check titles
+    my @match;
+    for my $command_re (@command) {
+        push @match, map { [ $command_re, $_ ] }
+            grep { $title =~ /$_/ } keys %{ $config->{$command_re} };
+    }
+
+    # cluster chunks if the switch is less than x seconds
+    if ( my $info = shift @match ) {
+        my $project    = $config->{ $info->[0] }{ $info->[1] };
+        my $last_chunk = $chunks{$project}[-1];
+        if ( $last_chunk && ( ! $option{split} || $time - $duration - $last_chunk->[5] < $option{split} ) ){
+            $last_chunk->[3] += $duration;
+            $last_chunk->[5] = $time;
+        }
+        else {
+            push @{ $chunks{$project} },
+                [ $project, @$info, $duration, $time - $duration, $time ];
+            push @chunks, $chunks{$project}[-1];
+        }
+    }
+}
+
+for my $chunk (@chunks) {
+    printf "%-30s %10s (%s - %s)\n", $chunk->[0],
+        duration($chunk->[3] ),
+        strftime( "%H:%M", localtime $chunk->[4] ),
+        strftime( "%H:%M", localtime $chunk->[5] );
+}
+
+sub duration {
+    my ($duration) = @_;
+    return join '', map { $_->[1] > 0 ? "$_->[1]$_->[0]": () }
+        [ h => int($duration/3600) ],
+        [ m => ($duration/60) % 60 ],
+        [ s => $duration % 60 ],
+
+}
+
+sub read_config {
+    local @ARGV = @_;
+    my $config;
+    while (<>) {
+        next if /^\s*(?:#|$)/;
+        chomp;
+        my ( $project, $command_re, $title_re ) = split /\t/;
+        no warnings;
+        $command_re                       = qr/$command_re/i;
+        $title_re                         = qr/$title_re/i;
+        $config->{$command_re}{$title_re} = $project;
+        push @{$config->{_keys}}, $command_re;
+    }
+
+    # remove dups
+    $config->{_keys} = [ uniq @{$config->{_keys}} ];
+    return $config;
+}
+
