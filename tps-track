@@ -1,0 +1,97 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use X11::Protocol;
+use POSIX qw( strftime );
+use File::HomeDir;
+use File::Spec;
+use Fcntl ':flock';
+use Getopt::Long;
+
+GetOptions( \my %option, 'verbose!' ) or die "Bad options\n";
+
+# gobal acces to X
+my $X = X11::Protocol->new;
+
+### helper subs
+
+# get a property by name
+sub get_property {
+    my ( $win, $name ) = @_;
+    return eval {
+        (   $X->GetProperty(
+                $win, $X->atom($name), $X->atom('STRING'), 0, -1, 0
+            )
+        )[0];
+    } || '';
+}
+
+# get the active window
+sub active {
+    return unpack 'L*',
+        (
+        $X->GetProperty(
+            $X->root, $X->atom("_NET_ACTIVE_WINDOW"),
+            'AnyPropertyType', 0, -1, 0
+        )
+        )[0];
+}
+
+# get the command that controls the given window
+sub command {
+    my ($win) = @_;
+    my $id = $win >> 21;
+
+    # check all top-level windows
+    my ( $root, $parent, @kids ) = $X->QueryTree( $X->root );
+    for my $kid (@kids) {
+        my $cmd = get_property( $kid, 'WM_COMMAND' );
+        next if !$cmd;
+        return ( split /\0/, $cmd )[0] if $id == ( $kid >> 21 );
+    }
+    return '';
+}
+
+# get some info about a given window (default: active)
+sub info {
+    my $active = shift || active();
+    my $info = [
+        $active, command($active),
+        get_property( $active, 'WM_NAME' ), -time
+    ];
+    unshift @$info, join "\0", @$info[ 0 .. 2 ];
+    return $info;
+}
+
+my %fh;
+
+sub get_fh {
+    my $date = strftime "%Y-%m-%d", localtime;
+    return $fh{$date} if exists $fh{$date};
+
+    # close all handles and open a new one for today
+    close $_ for values %fh;
+    my $file = File::Spec->catfile( File::HomeDir->my_data, '.tps',
+        "tracking-$date.log" );
+    open $fh{$date}, '>>', $file or die "Can't open $file: $!";
+    if ( flock $fh{$date}, LOCK_EX | LOCK_NB ) {
+        $fh{$date}->autoflush(1);
+        return $fh{$date};
+    }
+    else {
+        die "Log file $file already locked\n";
+    }
+}
+
+### main program
+my $info = info();
+while ( sleep 1 ) {
+    my $active = info();
+    if ( $active->[0] ne $info->[0] ) {
+        $info->[4] -= -time;
+        printf { get_fh() } "%d\t%s\t%s\t%d\n", time, @$info[ 2 .. 4 ];
+        printf "%d\t%s\t%s\t%d\n", time, @$info[ 2 .. 4 ] if $option{verbose};
+        $info = info();
+    }
+}
+
